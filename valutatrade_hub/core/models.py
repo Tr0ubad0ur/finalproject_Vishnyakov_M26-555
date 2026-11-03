@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import math
 import secrets
 from datetime import datetime
 
@@ -16,8 +17,18 @@ def _hash_password(password: str, salt: str) -> str:
 
 
 def _check_password_length(password: str) -> None:
+    """Проверяет минимальную длину пароля."""
     if len(password) < MIN_PASSWORD_LENGTH:
         raise ValueError(f"Пароль должен быть не короче {MIN_PASSWORD_LENGTH} символов")
+
+
+def _is_number(value: object) -> bool:
+    """Конечное число (int/float): не bool, не nan и не inf."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
 
 
 class User:
@@ -82,13 +93,13 @@ class User:
         }
 
     def change_password(self, new_password: str) -> None:
-        """Меняет пароль: новая проверка длины, новая соль, новый хеш."""
+        """Меняет пароль: проверка длины, новая соль, новый хеш."""
         _check_password_length(new_password)
         self._salt = secrets.token_hex(SALT_BYTES)
         self._hashed_password = _hash_password(new_password, self._salt)
 
     def verify_password(self, password: str) -> bool:
-        """Проверяет пароль на совпадение."""
+        """Проверяет введённый пароль на совпадение."""
         return hmac.compare_digest(
             self._hashed_password, _hash_password(password, self._salt)
         )
@@ -105,6 +116,7 @@ class User:
 
     @classmethod
     def from_dict(cls, data: dict) -> "User":
+        """Создаёт пользователя из записи users.json."""
         return cls(
             data["user_id"],
             data["username"],
@@ -128,16 +140,16 @@ class Wallet:
 
     @balance.setter
     def balance(self, value: float) -> None:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise TypeError("Баланс должен быть числом")
+        if not _is_number(value):
+            raise TypeError("Баланс должен быть конечным числом")
         if value < 0:
             raise ValueError("Баланс не может быть отрицательным")
         self._balance = float(value)
 
     @staticmethod
     def _check_amount(amount: float) -> None:
-        if isinstance(amount, bool) or not isinstance(amount, (int, float)):
-            raise TypeError("'amount' должен быть числом")
+        if not _is_number(amount):
+            raise TypeError("'amount' должен быть конечным числом")
         if amount <= 0:
             raise ValueError("'amount' должен быть положительным числом")
 
@@ -154,6 +166,7 @@ class Wallet:
         self.balance = self._balance - amount
 
     def get_balance_info(self) -> str:
+        """Строка с текущим балансом."""
         return f"{self.currency_code}: {self._balance:.4f}"
 
 
@@ -162,7 +175,7 @@ class Portfolio:
 
     def __init__(self, user_id: int, wallets: dict[str, Wallet] | None = None):
         self._user_id = user_id
-        self._wallets: dict[str, Wallet] = wallets or {}
+        self._wallets: dict[str, Wallet] = dict(wallets or {})
 
     @property
     def user_id(self) -> int:
@@ -181,6 +194,7 @@ class Portfolio:
         return self._wallets[currency_code]
 
     def get_wallet(self, currency_code: str) -> Wallet | None:
+        """Возвращает кошелёк по коду валюты или None."""
         return self._wallets.get(currency_code)
 
     def get_total_value(
@@ -205,6 +219,7 @@ class Portfolio:
 
     @classmethod
     def from_dict(cls, data: dict) -> "Portfolio":
+        """Создаёт портфель из записи portfolios.json."""
         wallets = {
             code: Wallet(code, w["balance"]) for code, w in data["wallets"].items()
         }
