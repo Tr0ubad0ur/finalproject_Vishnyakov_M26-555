@@ -19,4 +19,5 @@ class ApiRequestError(Exception):
     """Сбой обращения к внешнему API."""
 
     def __init__(self, reason: str):
+        self.reason = reason
         super().__init__(f"Ошибка при обращении к внешнему API: {reason}")
