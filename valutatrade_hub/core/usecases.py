@@ -1,9 +1,10 @@
+from valutatrade_hub.core.currencies import CryptoCurrency, get_currency
 from valutatrade_hub.core.exceptions import ApiRequestError, CurrencyNotFoundError
 from valutatrade_hub.core.models import Portfolio, User, Wallet
 from valutatrade_hub.core.utils import (
-    EXCHANGE_RATES,
     age_seconds,
     convert,
+    format_timestamp,
     normalize_code,
     utc_now_iso,
     validate_amount,
@@ -11,12 +12,15 @@ from valutatrade_hub.core.utils import (
 from valutatrade_hub.decorators import log_action
 from valutatrade_hub.infra.database import DatabaseManager
 from valutatrade_hub.infra.settings import SettingsLoader
+from valutatrade_hub.parser_service.updater import UpdateResult, create_updater
 
 settings = SettingsLoader()
 db = DatabaseManager()
 
 BASE_CURRENCY = settings.get("DEFAULT_BASE_CURRENCY")
-STUB_SOURCE = "stub"
+EMPTY_CACHE_MESSAGE = (
+    "Локальный кеш курсов пуст. Выполните 'update-rates', чтобы загрузить данные."
+)
 
 
 def _read(key: str, default):
@@ -28,20 +32,15 @@ def _write(key: str, data) -> None:
 
 
 # ---------- курсы ----------
-def refresh_rates() -> int:
-    """Обновляет кэш rates.json. Пока заглушка; на этапе 4 заменяется на парсер."""
-    now = utc_now_iso()
-    pairs = {
-        f"{code}_{BASE_CURRENCY}": {
-            "rate": rate,
-            "updated_at": now,
-            "source": STUB_SOURCE,
-        }
-        for code, rate in EXCHANGE_RATES.items()
-        if code != BASE_CURRENCY
-    }
-    _write("RATES_FILE", {"pairs": pairs, "last_refresh": now})
-    return len(pairs)
+def update_rates(source: str | None = None) -> UpdateResult:
+    """Запускает Parser Service (все источники или один)."""
+    return create_updater().run_update(source)
+
+
+def _refresh_or_raise() -> None:
+    result = update_rates()
+    if result.total == 0:
+        raise ApiRequestError("; ".join(result.errors) or "нет данных от источников")
 
 
 def _cached_pair(code: str) -> dict | None:
@@ -49,15 +48,25 @@ def _cached_pair(code: str) -> dict | None:
     return pairs.get(f"{code}_{BASE_CURRENCY}")
 
 
+def _is_stale(item: dict) -> bool:
+    return age_seconds(item["updated_at"]) > settings.get("RATES_TTL_SECONDS")
+
+
 def _usd_rate(code: str) -> tuple[float, str]:
     """Стоимость 1 единицы валюты в USD и время обновления (с учётом TTL)."""
     if code == BASE_CURRENCY:
         return 1.0, utc_now_iso()
     item = _cached_pair(code)
-    if item is None or age_seconds(item["updated_at"]) > settings.get(
-        "RATES_TTL_SECONDS"
-    ):
-        refresh_rates()  # может бросить ApiRequestError
+    if item is None or _is_stale(item):
+        try:
+            _refresh_or_raise()
+        except ApiRequestError as exc:
+            if item is None:
+                raise
+            raise ApiRequestError(
+                f"курсы устарели (обновлены {format_timestamp(item['updated_at'])}), "
+                "обновить не удалось. Повторите позже: update-rates"
+            ) from exc
         item = _cached_pair(code)
     if item is None:
         raise ApiRequestError(f"курс {code}→{BASE_CURRENCY} недоступен")
@@ -70,6 +79,51 @@ def get_rate(from_code: str, to_code: str) -> tuple[float, str]:
     rate_from, updated_from = _usd_rate(source)
     rate_to, updated_to = _usd_rate(target)
     return rate_from / rate_to, min(updated_from, updated_to)
+
+
+def _is_crypto(code: str) -> bool:
+    try:
+        return isinstance(get_currency(code), CryptoCurrency)
+    except CurrencyNotFoundError:
+        return False
+
+
+def show_rates(
+    currency: str | None = None,
+    top: int | None = None,
+    base: str = BASE_CURRENCY,
+) -> dict:
+    """Курсы из локального кеша с фильтрами (--currency, --top, --base)."""
+    cache = _read("RATES_FILE", {})
+    pairs = cache.get("pairs", {})
+    if not pairs:
+        raise ValueError(EMPTY_CACHE_MESSAGE)
+    in_usd = {BASE_CURRENCY: 1.0}
+    in_usd.update({pair.split("_")[0]: item["rate"] for pair, item in pairs.items()})
+    base = base.strip().upper()
+    if base not in in_usd:
+        raise ValueError(f"Курс для '{base}' не найден в кеше.")
+    rates = {
+        code: value / in_usd[base] for code, value in in_usd.items() if code != base
+    }
+    if currency:
+        code = currency.strip().upper()
+        if code not in rates:
+            raise ValueError(f"Курс для '{code}' не найден в кеше.")
+        rates = {code: rates[code]}
+    if top is not None:
+        if top <= 0:
+            raise ValueError("'--top' должен быть положительным числом")
+        crypto = [(c, v) for c, v in rates.items() if _is_crypto(c)]
+        ordered = sorted(crypto, key=lambda item: item[1], reverse=True)[:top]
+    else:
+        ordered = sorted(rates.items())
+    if not ordered:
+        raise ValueError("Нет данных по заданным фильтрам.")
+    return {
+        "updated_at": cache.get("last_refresh"),
+        "rows": [(f"{code}_{base}", value) for code, value in ordered],
+    }
 
 
 # ---------- пользователи ----------

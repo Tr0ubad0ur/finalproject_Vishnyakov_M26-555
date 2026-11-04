@@ -3,6 +3,8 @@ import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from prettytable import PrettyTable
+
 from valutatrade_hub.core import usecases
 from valutatrade_hub.core.currencies import supported_codes
 from valutatrade_hub.core.exceptions import (
@@ -17,6 +19,7 @@ from valutatrade_hub.core.utils import (
 )
 from valutatrade_hub.logging_config import setup_logging
 
+PARSER_LOG = "logs/parser.log"
 PROMPT = "> "
 SEPARATOR = "-" * 33
 HELP_TEXT = """Команды:
@@ -27,6 +30,8 @@ HELP_TEXT = """Команды:
   buy --currency <код> --amount <число>
   sell --currency <код> --amount <число>
   get-rate --from <код> --to <код>
+  update-rates [--source coingecko|exchangerate]
+  show-rates [--currency <код>] [--top <N>] [--base <код>]
   help, exit"""
 
 
@@ -173,6 +178,47 @@ def cmd_get_rate(argv: list[str]) -> None:
     )
 
 
+def cmd_update_rates(argv: list[str]) -> None:
+    args = _parse(
+        "update-rates",
+        argv,
+        ("--source", {"choices": ["coingecko", "exchangerate"]}),
+    )
+    print("INFO: Starting rates update...")
+    result = usecases.update_rates(args.source)
+    for name, count, error in result.results:
+        if error:
+            print(f"ERROR: Failed to fetch from {name}: {error}")
+        else:
+            print(f"INFO: Fetching from {name}... OK ({count} rates)")
+    if result.total:
+        print(f"INFO: Writing {result.total} rates to {result.rates_path}...")
+    if result.errors:
+        print(f"Update completed with errors. Check {PARSER_LOG} for details.")
+    else:
+        print(
+            f"Update successful. Total rates updated: {result.total}. "
+            f"Last refresh: {result.last_refresh}"
+        )
+
+
+def cmd_show_rates(argv: list[str]) -> None:
+    args = _parse(
+        "show-rates",
+        argv,
+        ("--currency", {}),
+        ("--top", {"type": int}),
+        ("--base", {"default": usecases.BASE_CURRENCY}),
+    )
+    result = usecases.show_rates(args.currency, args.top, args.base)
+    print(f"Rates from cache (updated at {result['updated_at']}):")
+    table = PrettyTable(["Пара", "Курс"])
+    table.align["Пара"], table.align["Курс"] = "l", "r"
+    for pair, rate in result["rows"]:
+        table.add_row([pair, format_rate(rate)])
+    print(table)
+
+
 COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "register": cmd_register,
     "login": cmd_login,
@@ -181,6 +227,8 @@ COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "buy": cmd_buy,
     "sell": cmd_sell,
     "get-rate": cmd_get_rate,
+    "update-rates": cmd_update_rates,
+    "show-rates": cmd_show_rates,
 }
 
 
