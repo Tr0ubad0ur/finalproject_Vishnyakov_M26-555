@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from valutatrade_hub.core import usecases
+from valutatrade_hub.core.currencies import supported_codes
 from valutatrade_hub.core.exceptions import (
     ApiRequestError,
     CurrencyNotFoundError,
@@ -14,6 +15,7 @@ from valutatrade_hub.core.utils import (
     format_rate,
     format_timestamp,
 )
+from valutatrade_hub.logging_config import setup_logging
 
 PROMPT = "> "
 SEPARATOR = "-" * 33
@@ -203,8 +205,12 @@ def handle(line: str) -> bool:
         return True
     try:
         command(argv)
-    except (InsufficientFundsError, CurrencyNotFoundError, ApiRequestError) as exc:
+    except InsufficientFundsError as exc:
         print(exc)
+    except CurrencyNotFoundError as exc:
+        print(f"{exc}. Поддерживаемые валюты: {', '.join(supported_codes())}")
+    except ApiRequestError as exc:
+        print(f"{exc}\nПовторите попытку позже или проверьте подключение к сети.")
     except (ValueError, PermissionError) as exc:
         print(exc)
     return True
@@ -212,6 +218,7 @@ def handle(line: str) -> bool:
 
 def main() -> None:
     """Интерактивный цикл CLI."""
+    setup_logging()
     print("ValutaTrade Hub. Введите help для списка команд.")
     while True:
         try:

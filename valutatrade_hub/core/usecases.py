@@ -1,54 +1,66 @@
-from valutatrade_hub.core.exceptions import CurrencyNotFoundError
+from valutatrade_hub.core.exceptions import ApiRequestError, CurrencyNotFoundError
 from valutatrade_hub.core.models import Portfolio, User, Wallet
 from valutatrade_hub.core.utils import (
     EXCHANGE_RATES,
-    PORTFOLIOS_FILE,
-    RATES_FILE,
-    USERS_FILE,
     age_seconds,
     convert,
-    load_json,
     normalize_code,
-    save_json,
     utc_now_iso,
     validate_amount,
 )
+from valutatrade_hub.decorators import log_action
+from valutatrade_hub.infra.database import DatabaseManager
+from valutatrade_hub.infra.settings import SettingsLoader
 
-BASE_CURRENCY = "USD"
-RATES_TTL_SECONDS = 300
+settings = SettingsLoader()
+db = DatabaseManager()
+
+BASE_CURRENCY = settings.get("DEFAULT_BASE_CURRENCY")
 STUB_SOURCE = "stub"
 
 
+def _read(key: str, default):
+    return db.load(settings.get(key), default)
+
+
+def _write(key: str, data) -> None:
+    db.save(settings.get(key), data)
+
+
 # ---------- курсы ----------
-def _refresh_rates_from_stub() -> dict:
-    """Заполняет кэш rates.json из заглушки (до подключения Parser Service)."""
+def refresh_rates() -> int:
+    """Обновляет кэш rates.json. Пока заглушка; на этапе 4 заменяется на парсер."""
     now = utc_now_iso()
-    cache = {
-        "pairs": {
-            f"{code}_{BASE_CURRENCY}": {
-                "rate": rate,
-                "updated_at": now,
-                "source": STUB_SOURCE,
-            }
-            for code, rate in EXCHANGE_RATES.items()
-            if code != BASE_CURRENCY
-        },
-        "last_refresh": now,
+    pairs = {
+        f"{code}_{BASE_CURRENCY}": {
+            "rate": rate,
+            "updated_at": now,
+            "source": STUB_SOURCE,
+        }
+        for code, rate in EXCHANGE_RATES.items()
+        if code != BASE_CURRENCY
     }
-    save_json(RATES_FILE, cache)
-    return cache
+    _write("RATES_FILE", {"pairs": pairs, "last_refresh": now})
+    return len(pairs)
+
+
+def _cached_pair(code: str) -> dict | None:
+    pairs = _read("RATES_FILE", {}).get("pairs", {})
+    return pairs.get(f"{code}_{BASE_CURRENCY}")
 
 
 def _usd_rate(code: str) -> tuple[float, str]:
-    """Стоимость 1 единицы валюты в USD и время обновления."""
+    """Стоимость 1 единицы валюты в USD и время обновления (с учётом TTL)."""
     if code == BASE_CURRENCY:
         return 1.0, utc_now_iso()
-    pair = f"{code}_{BASE_CURRENCY}"
-    item = load_json(RATES_FILE, {}).get("pairs", {}).get(pair)
-    if item is None or age_seconds(item["updated_at"]) > RATES_TTL_SECONDS:
-        item = _refresh_rates_from_stub()["pairs"].get(pair)
+    item = _cached_pair(code)
+    if item is None or age_seconds(item["updated_at"]) > settings.get(
+        "RATES_TTL_SECONDS"
+    ):
+        refresh_rates()  # может бросить ApiRequestError
+        item = _cached_pair(code)
     if item is None:
-        raise CurrencyNotFoundError(code)
+        raise ApiRequestError(f"курс {code}→{BASE_CURRENCY} недоступен")
     return item["rate"], item["updated_at"]
 
 
@@ -61,27 +73,29 @@ def get_rate(from_code: str, to_code: str) -> tuple[float, str]:
 
 
 # ---------- пользователи ----------
+@log_action("REGISTER")
 def register(username: str, password: str) -> int:
     """Регистрирует пользователя и создаёт пустой портфель. Возвращает user_id."""
     username = username.strip()
     if not username:
         raise ValueError("Имя не может быть пустым")
-    users = load_json(USERS_FILE, [])
+    users = _read("USERS_FILE", [])
     if any(u["username"] == username for u in users):
         raise ValueError(f"Имя пользователя '{username}' уже занято")
     user_id = max((u["user_id"] for u in users), default=0) + 1
     user = User.create(user_id, username, password)
     users.append(user.to_dict())
-    save_json(USERS_FILE, users)
-    portfolios = load_json(PORTFOLIOS_FILE, [])
+    _write("USERS_FILE", users)
+    portfolios = _read("PORTFOLIOS_FILE", [])
     portfolios.append(Portfolio(user_id).to_dict())
-    save_json(PORTFOLIOS_FILE, portfolios)
+    _write("PORTFOLIOS_FILE", portfolios)
     return user_id
 
 
+@log_action("LOGIN")
 def login(username: str, password: str) -> User:
     """Проверяет логин и пароль, возвращает пользователя."""
-    for record in load_json(USERS_FILE, []):
+    for record in _read("USERS_FILE", []):
         if record["username"] == username:
             user = User.from_dict(record)
             if not user.verify_password(password):
@@ -92,7 +106,7 @@ def login(username: str, password: str) -> User:
 
 # ---------- портфель ----------
 def _load_portfolio(user_id: int) -> Portfolio:
-    for record in load_json(PORTFOLIOS_FILE, []):
+    for record in _read("PORTFOLIOS_FILE", []):
         if record["user_id"] == user_id:
             return Portfolio.from_dict(record)
     return Portfolio(user_id)
@@ -100,10 +114,10 @@ def _load_portfolio(user_id: int) -> Portfolio:
 
 def _save_portfolio(portfolio: Portfolio) -> None:
     records = [
-        r for r in load_json(PORTFOLIOS_FILE, []) if r["user_id"] != portfolio.user_id
+        r for r in _read("PORTFOLIOS_FILE", []) if r["user_id"] != portfolio.user_id
     ]
     records.append(portfolio.to_dict())
-    save_json(PORTFOLIOS_FILE, records)
+    _write("PORTFOLIOS_FILE", records)
 
 
 def _get_or_create_wallet(portfolio: Portfolio, code: str) -> Wallet:
@@ -112,28 +126,29 @@ def _get_or_create_wallet(portfolio: Portfolio, code: str) -> Wallet:
 
 def show_portfolio(user_id: int, base: str = BASE_CURRENCY) -> dict:
     """Кошельки пользователя и итоговая стоимость в базовой валюте."""
-    base = normalize_code(base)
     try:
-        _usd_rate(base)
+        base_code = normalize_code(base)
     except CurrencyNotFoundError:
-        raise ValueError(f"Неизвестная базовая валюта '{base}'") from None
+        raise ValueError(
+            f"Неизвестная базовая валюта '{base.strip().upper()}'"
+        ) from None
     portfolio = _load_portfolio(user_id)
-    rates = {code: _usd_rate(code)[0] for code in {*portfolio.wallets, base}}
+    rates = {code: _usd_rate(code)[0] for code in {*portfolio.wallets, base_code}}
     rows = [
-        (code, wallet.balance, convert(wallet.balance, code, base, rates))
+        (code, wallet.balance, convert(wallet.balance, code, base_code, rates))
         for code, wallet in portfolio.wallets.items()
     ]
     return {
-        "base": base,
+        "base": base_code,
         "rows": rows,
-        "total": portfolio.get_total_value(base, rates),
+        "total": portfolio.get_total_value(base_code, rates),
     }
 
 
+@log_action("DEPOSIT")
 def deposit(user_id: int, currency_code: str, amount: float) -> float:
     """Пополняет кошелёк (служебная команда). Возвращает новый баланс."""
     code, amount = normalize_code(currency_code), validate_amount(amount)
-    _usd_rate(code)  # проверка, что валюта известна
     portfolio = _load_portfolio(user_id)
     wallet = _get_or_create_wallet(portfolio, code)
     wallet.deposit(amount)
@@ -148,6 +163,7 @@ def _prepare_trade(currency_code: str, amount: float) -> tuple[str, float]:
     return code, amount
 
 
+@log_action("BUY", verbose=True)
 def buy(user_id: int, currency_code: str, amount: float) -> dict:
     """Покупка: списывает USD, начисляет купленную валюту."""
     code, amount = _prepare_trade(currency_code, amount)
@@ -163,12 +179,14 @@ def buy(user_id: int, currency_code: str, amount: float) -> dict:
         "code": code,
         "amount": amount,
         "rate": rate,
+        "base": BASE_CURRENCY,
         "before": before,
         "after": wallet.balance,
         "cost": cost,
     }
 
 
+@log_action("SELL", verbose=True)
 def sell(user_id: int, currency_code: str, amount: float) -> dict:
     """Продажа: списывает валюту, начисляет USD."""
     code, amount = _prepare_trade(currency_code, amount)
@@ -188,6 +206,7 @@ def sell(user_id: int, currency_code: str, amount: float) -> dict:
         "code": code,
         "amount": amount,
         "rate": rate,
+        "base": BASE_CURRENCY,
         "before": before,
         "after": wallet.balance,
         "proceeds": proceeds,

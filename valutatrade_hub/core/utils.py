@@ -1,21 +1,9 @@
-import json
 import math
-import os
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any
 
-from valutatrade_hub.core.exceptions import CurrencyNotFoundError
-
-DATA_DIR = Path("data")
-USERS_FILE = DATA_DIR / "users.json"
-PORTFOLIOS_FILE = DATA_DIR / "portfolios.json"
-RATES_FILE = DATA_DIR / "rates.json"
+from valutatrade_hub.core.currencies import CryptoCurrency, get_currency
 
 TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
-CODE_MIN_LENGTH = 2
-CODE_MAX_LENGTH = 5
-CRYPTO_CODES = frozenset({"BTC", "ETH", "SOL"})
 CRYPTO_DECIMALS = 4
 FIAT_DECIMALS = 2
 AMOUNT_ERROR = "'amount' должен быть положительным числом"
@@ -45,24 +33,6 @@ def convert(
         raise ValueError(f"Нет курса для '{exc.args[0]}'") from None
 
 
-# ---------- JSON-хранилище ----------
-def load_json(path: Path, default: Any) -> Any:
-    """Читает JSON-файл; если его нет или он пуст/повреждён, возвращает default."""
-    try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return default
-
-
-def save_json(path: Path, data: Any) -> None:
-    """Атомарная запись: временный файл, затем замена."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
-
-
 # ---------- время ----------
 def utc_now_iso() -> str:
     """Текущее время UTC в формате 2025-10-09T12:00:00Z."""
@@ -77,13 +47,10 @@ def age_seconds(timestamp: str) -> float:
 
 # ---------- валидация ----------
 def normalize_code(code: str) -> str:
-    """Проверяет формат кода валюты и приводит его к верхнему регистру."""
+    """Приводит код к верхнему регистру и проверяет его по реестру валют."""
     if not isinstance(code, str) or not code.strip():
         raise ValueError("Код валюты не может быть пустым")
-    code = code.strip().upper()
-    if not CODE_MIN_LENGTH <= len(code) <= CODE_MAX_LENGTH or " " in code:
-        raise CurrencyNotFoundError(code)
-    return code
+    return get_currency(code.strip().upper()).code
 
 
 def validate_amount(amount: object) -> float:
@@ -100,8 +67,8 @@ def validate_amount(amount: object) -> float:
 # ---------- форматирование ----------
 def format_balance(code: str, value: float) -> str:
     """Баланс: 4 знака для крипты, 2 для фиата."""
-    decimals = CRYPTO_DECIMALS if code in CRYPTO_CODES else FIAT_DECIMALS
-    return f"{value:.{decimals}f}"
+    is_crypto = isinstance(get_currency(code), CryptoCurrency)
+    return f"{value:.{CRYPTO_DECIMALS if is_crypto else FIAT_DECIMALS}f}"
 
 
 def format_rate(rate: float) -> str:
