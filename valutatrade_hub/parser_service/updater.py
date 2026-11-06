@@ -24,6 +24,7 @@ class UpdateResult:
 
     @property
     def errors(self) -> list[str]:
+        """Тексты ошибок по источникам, которые не ответили."""
         return [f"{name}: {error}" for name, _, error in self.results if error]
 
 

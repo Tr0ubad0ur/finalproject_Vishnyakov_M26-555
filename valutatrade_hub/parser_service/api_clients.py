@@ -77,6 +77,7 @@ class CoinGeckoClient(BaseApiClient):
     name = "CoinGecko"
 
     def fetch_rates(self) -> dict[str, float]:
+        """Курсы BTC, ETH, SOL к USD в формате {'BTC_USD': 59337.21, ...}."""
         ids = {
             code: self.config.CRYPTO_ID_MAP[code]
             for code in self.config.CRYPTO_CURRENCIES
@@ -97,6 +98,7 @@ class CoinGeckoClient(BaseApiClient):
         }
 
     def meta_for(self, pair: str) -> dict:
+        """Мета-данные записи истории: id монеты в CoinGecko и параметры запроса."""
         code = pair.split("_")[0]
         return {"raw_id": self.config.CRYPTO_ID_MAP[code], **self.meta}
 
@@ -107,6 +109,7 @@ class ExchangeRateApiClient(BaseApiClient):
     name = "ExchangeRate-API"
 
     def fetch_rates(self) -> dict[str, float]:
+        """Курсы фиатных валют к USD (инвертированные: EUR_USD = 1 / курс API)."""
         key = self.config.EXCHANGERATE_API_KEY
         if not key:
             raise ApiRequestError("не задан EXCHANGERATE_API_KEY (см. .env)")

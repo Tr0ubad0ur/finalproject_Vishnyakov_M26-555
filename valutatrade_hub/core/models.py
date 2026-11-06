@@ -60,10 +60,12 @@ class User:
 
     @property
     def user_id(self) -> int:
+        """Уникальный идентификатор пользователя."""
         return self._user_id
 
     @property
     def username(self) -> str:
+        """Имя пользователя."""
         return self._username
 
     @username.setter
@@ -74,14 +76,17 @@ class User:
 
     @property
     def hashed_password(self) -> str:
+        """Хеш пароля (sha256 с солью)."""
         return self._hashed_password
 
     @property
     def salt(self) -> str:
+        """Уникальная соль пользователя."""
         return self._salt
 
     @property
     def registration_date(self) -> datetime:
+        """Дата регистрации."""
         return self._registration_date
 
     def get_user_info(self) -> dict:
@@ -136,6 +141,7 @@ class Wallet:
 
     @property
     def balance(self) -> float:
+        """Текущий баланс кошелька."""
         return self._balance
 
     @balance.setter
@@ -179,6 +185,7 @@ class Portfolio:
 
     @property
     def user_id(self) -> int:
+        """Идентификатор владельца портфеля (только чтение)."""
         return self._user_id
 
     @property

@@ -12,16 +12,23 @@ from valutatrade_hub.core.exceptions import (
     CurrencyNotFoundError,
     InsufficientFundsError,
 )
-from valutatrade_hub.core.utils import (
-    format_balance,
-    format_rate,
-    format_timestamp,
-)
+from valutatrade_hub.core.utils import format_balance, format_rate, format_timestamp
 from valutatrade_hub.logging_config import setup_logging
 
-PARSER_LOG = "logs/parser.log"
 PROMPT = "> "
 SEPARATOR = "-" * 33
+PARSER_LOG = "logs/parser.log"
+PARSER_SOURCES = ("coingecko", "exchangerate")
+
+CREDENTIAL_ARGS = (
+    ("--username", {"required": True}),
+    ("--password", {"required": True}),
+)
+TRADE_ARGS = (
+    ("--currency", {"required": True}),
+    ("--amount", {"required": True, "type": float}),
+)
+
 HELP_TEXT = """Команды:
   register --username <имя> --password <пароль>
   login --username <имя> --password <пароль>
@@ -50,10 +57,12 @@ class _ArgumentParser(argparse.ArgumentParser):
     """Парсер, который бросает ValueError вместо завершения программы."""
 
     def error(self, message: str):
+        """Превращает ошибку разбора аргументов в ValueError."""
         raise ValueError(f"Ошибка аргументов: {message}")
 
 
 def _parse(name: str, argv: list[str], *arguments: tuple[str, dict]):
+    """Разбирает аргументы команды по списку (флаг, параметры)."""
     parser = _ArgumentParser(prog=name, add_help=False)
     for flag, options in arguments:
         parser.add_argument(flag, **options)
@@ -61,19 +70,29 @@ def _parse(name: str, argv: list[str], *arguments: tuple[str, dict]):
 
 
 def _require_login() -> int:
+    """Возвращает id текущего пользователя или требует выполнить login."""
     if session.user_id is None:
         raise PermissionError("Сначала выполните login")
     return session.user_id
 
 
+def _print_trade(title: str, result: dict, total_label: str, total: float) -> None:
+    """Общий вывод итога сделки для buy и sell."""
+    code = result["code"]
+    print(
+        f"{title}: {format_balance(code, result['amount'])} {code} "
+        f"по курсу {result['rate']:,.2f} USD/{code}\n"
+        "Изменения в портфеле:\n"
+        f"- {code}: было {format_balance(code, result['before'])} "
+        f"→ стало {format_balance(code, result['after'])}\n"
+        f"{total_label}: {total:,.2f} USD"
+    )
+
+
 # ---------- команды ----------
 def cmd_register(argv: list[str]) -> None:
-    args = _parse(
-        "register",
-        argv,
-        ("--username", {"required": True}),
-        ("--password", {"required": True}),
-    )
+    """Команда register: регистрация нового пользователя."""
+    args = _parse("register", argv, *CREDENTIAL_ARGS)
     user_id = usecases.register(args.username, args.password)
     print(
         f"Пользователь '{args.username}' зарегистрирован (id={user_id}). "
@@ -82,20 +101,19 @@ def cmd_register(argv: list[str]) -> None:
 
 
 def cmd_login(argv: list[str]) -> None:
-    args = _parse(
-        "login",
-        argv,
-        ("--username", {"required": True}),
-        ("--password", {"required": True}),
-    )
+    """Команда login: вход и фиксация текущей сессии."""
+    args = _parse("login", argv, *CREDENTIAL_ARGS)
     user = usecases.login(args.username, args.password)
     session.user_id, session.username = user.user_id, user.username
     print(f"Вы вошли как '{user.username}'")
 
 
 def cmd_show_portfolio(argv: list[str]) -> None:
+    """Команда show-portfolio: кошельки и итоговая стоимость в базовой валюте."""
     user_id = _require_login()
-    args = _parse("show-portfolio", argv, ("--base", {"default": "USD"}))
+    args = _parse(
+        "show-portfolio", argv, ("--base", {"default": usecases.BASE_CURRENCY})
+    )
     result = usecases.show_portfolio(user_id, args.base)
     base = result["base"]
     if not result["rows"]:
@@ -109,59 +127,34 @@ def cmd_show_portfolio(argv: list[str]) -> None:
 
 
 def cmd_deposit(argv: list[str]) -> None:
+    """Команда deposit: пополнение кошелька (служебная)."""
     user_id = _require_login()
-    args = _parse(
-        "deposit",
-        argv,
-        ("--currency", {"required": True}),
-        ("--amount", {"required": True, "type": float}),
-    )
+    args = _parse("deposit", argv, *TRADE_ARGS)
     balance = usecases.deposit(user_id, args.currency, args.amount)
     code = args.currency.strip().upper()
     print(f"Баланс {code}: {format_balance(code, balance)}")
 
 
 def cmd_buy(argv: list[str]) -> None:
+    """Команда buy: покупка валюты за USD."""
     user_id = _require_login()
-    args = _parse(
-        "buy",
-        argv,
-        ("--currency", {"required": True}),
-        ("--amount", {"required": True, "type": float}),
-    )
-    r = usecases.buy(user_id, args.currency, args.amount)
-    code = r["code"]
-    print(
-        f"Покупка выполнена: {format_balance(code, r['amount'])} {code} "
-        f"по курсу {r['rate']:,.2f} USD/{code}\n"
-        f"Изменения в портфеле:\n"
-        f"- {code}: было {format_balance(code, r['before'])} "
-        f"→ стало {format_balance(code, r['after'])}\n"
-        f"Оценочная стоимость покупки: {r['cost']:,.2f} USD"
+    args = _parse("buy", argv, *TRADE_ARGS)
+    result = usecases.buy(user_id, args.currency, args.amount)
+    _print_trade(
+        "Покупка выполнена", result, "Оценочная стоимость покупки", result["cost"]
     )
 
 
 def cmd_sell(argv: list[str]) -> None:
+    """Команда sell: продажа валюты за USD."""
     user_id = _require_login()
-    args = _parse(
-        "sell",
-        argv,
-        ("--currency", {"required": True}),
-        ("--amount", {"required": True, "type": float}),
-    )
-    r = usecases.sell(user_id, args.currency, args.amount)
-    code = r["code"]
-    print(
-        f"Продажа выполнена: {format_balance(code, r['amount'])} {code} "
-        f"по курсу {r['rate']:,.2f} USD/{code}\n"
-        f"Изменения в портфеле:\n"
-        f"- {code}: было {format_balance(code, r['before'])} "
-        f"→ стало {format_balance(code, r['after'])}\n"
-        f"Оценочная выручка: {r['proceeds']:,.2f} USD"
-    )
+    args = _parse("sell", argv, *TRADE_ARGS)
+    result = usecases.sell(user_id, args.currency, args.amount)
+    _print_trade("Продажа выполнена", result, "Оценочная выручка", result["proceeds"])
 
 
 def cmd_get_rate(argv: list[str]) -> None:
+    """Команда get-rate: курс одной валюты к другой и обратный курс."""
     args = _parse(
         "get-rate",
         argv,
@@ -179,11 +172,8 @@ def cmd_get_rate(argv: list[str]) -> None:
 
 
 def cmd_update_rates(argv: list[str]) -> None:
-    args = _parse(
-        "update-rates",
-        argv,
-        ("--source", {"choices": ["coingecko", "exchangerate"]}),
-    )
+    """Команда update-rates: немедленное обновление курсов через Parser Service."""
+    args = _parse("update-rates", argv, ("--source", {"choices": PARSER_SOURCES}))
     print("INFO: Starting rates update...")
     result = usecases.update_rates(args.source)
     for name, count, error in result.results:
@@ -203,6 +193,7 @@ def cmd_update_rates(argv: list[str]) -> None:
 
 
 def cmd_show_rates(argv: list[str]) -> None:
+    """Команда show-rates: курсы из локального кеша с фильтрами."""
     args = _parse(
         "show-rates",
         argv,
