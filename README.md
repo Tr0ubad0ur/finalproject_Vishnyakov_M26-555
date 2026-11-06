@@ -152,3 +152,5 @@ Core читает только `data/rates.json`, обращений к внеш
 - **Свойство `Portfolio.user_id`** (только чтение) вместо объекта пользователя.
 
 ## Демо
+
+[![asciicast](https://asciinema.org/a/MGTRDT4byVkgu0MF.svg)](https://asciinema.org/a/MGTRDT4byVkgu0MF)
